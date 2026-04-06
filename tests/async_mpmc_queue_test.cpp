@@ -37,17 +37,17 @@ TEST(AsyncMPMCQueueTest, DequeueFromClosed) {
 }
 
 TEST(AsyncMPMCQueueTest, CloseFlushPendingCallbacks) {
-    AsyncMPMCQueue<int> q;
-
     std::atomic<int> nullopt_count{0};
-    for (int i = 0; i < 5; ++i) {
-        q.Dequeue([&](std::optional<int> v) {
-            if (!v.has_value()) 
-                ++nullopt_count;
-        });
-    }
-
-    q.Close();
+    {
+        AsyncMPMCQueue<int> q;
+        for (int i = 0; i < 5; ++i) {
+            q.Dequeue([&](std::optional<int> v) {
+                if (!v.has_value())
+                    ++nullopt_count;
+            });
+        }
+        q.Close();
+    } // destructor joins worker, all callbacks guaranteed to have run
     EXPECT_EQ(nullopt_count.load(), 5) << "All pending callbacks should be called with nullopt on Close()";
 }
 
@@ -273,35 +273,37 @@ TEST(AsyncMPMCQueueTest, MPMC) {
 }
 
 TEST(AsyncMPMCQueueTest, CloseDuringActivity) {
-    AsyncMPMCQueue<int> q;
-    const int N = 200;
-
     std::atomic<int> values_received{0};
     std::atomic<int> nullopts_received{0};
 
-    std::thread consumer([&] {
-        for (int i = 0; i < N; ++i) {
-            q.Dequeue([&](std::optional<int> v) {
-                if (v) 
-                    ++values_received;
-                else 
-                    ++nullopts_received;
-            });
-        }
-    });
+    {
+        AsyncMPMCQueue<int> q;
+        const int N = 200;
 
-    std::thread producer([&] {
-        for (int i = 0; i < N / 2; ++i) 
-            q.Enqueue(i);
-    });
+        std::thread consumer([&] {
+            for (int i = 0; i < N; ++i) {
+                q.Dequeue([&](std::optional<int> v) {
+                    if (v)
+                        ++values_received;
+                    else
+                        ++nullopts_received;
+                });
+            }
+        });
 
-    std::this_thread::sleep_for(5ms);
-    q.Close();
+        std::thread producer([&] {
+            for (int i = 0; i < N / 2; ++i)
+                q.Enqueue(i);
+        });
 
-    producer.join();
-    consumer.join();
+        std::this_thread::sleep_for(5ms);
+        q.Close();
 
-    EXPECT_EQ(values_received.load() + nullopts_received.load(), N)
+        producer.join();
+        consumer.join();
+    } // destructor joins worker, all callbacks guaranteed to have run
+
+    EXPECT_EQ(values_received.load() + nullopts_received.load(), 200)
         << "Every callback must be called exactly once (either with value or nullopt), got "
         << values_received.load() << " values and " << nullopts_received.load() << " nullopts";
 }
@@ -373,4 +375,21 @@ TEST(AsyncMPMCQueueTest, ThrowingCallbackDoesNotBreakQueue) {
 
     EXPECT_TRUE(WaitFor([&] { return received.load() == 2; })) << "Queue should remain functional after a callback throws";
     q.Close();
+}
+
+TEST(AsyncMPMCQueueTest, CloseFromCallback) {
+    std::atomic<bool> close_called{false};
+
+    {
+        AsyncMPMCQueue<int> q;
+        q.Enqueue(1);
+        q.Dequeue([&](std::optional<int>) {
+            q.Close();
+            close_called = true;
+        });
+
+        EXPECT_TRUE(WaitFor([&] { return close_called.load(); })) << "Callback should have been called";
+    } // destructor joins worker — no deadlock
+
+    EXPECT_TRUE(close_called.load()) << "Close() from inside callback should not deadlock or crash";
 }

@@ -52,13 +52,12 @@ public:
             isClosed_ = true;
         }
         cv_.notify_one();
-
-        if (workerThread_.joinable())
-            workerThread_.join();
     }
 
     ~AsyncMPMCQueue() {
         Close();
+        if (workerThread_.joinable())
+            workerThread_.join();
     }
 
 private:
