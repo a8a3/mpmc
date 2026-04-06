@@ -34,7 +34,7 @@ public:
 
         if (isClosed_) {
             lock.unlock();
-            cb(std::nullopt);
+            try { cb(std::nullopt); } catch (...) {}
             return;
         }
 
@@ -80,7 +80,7 @@ private:
                 callbacksQueue_.pop();
 
                 lock.unlock();
-                cb(std::move(value));
+                try { cb(std::move(value)); } catch (...) {}
                 lock.lock();
                 if (isClosed_) break;  // вызов Close() мог произойти во время выполнения callback-а
             }
@@ -92,7 +92,7 @@ private:
             callbacksQueue_.pop();
 
             lock.unlock();
-            cb(std::nullopt);
+            try { cb(std::nullopt); } catch (...) {}
             lock.lock();
         }
     }

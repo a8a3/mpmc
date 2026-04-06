@@ -357,3 +357,20 @@ TEST(AsyncMPMCQueueTest, ReentrantEnqueueFromCallback) {
     EXPECT_TRUE(WaitFor([&] { return received.load() == 2; })) << "Re-entrant Enqueue from callback should not deadlock";
     q.Close();
 }
+
+TEST(AsyncMPMCQueueTest, ThrowingCallbackDoesNotBreakQueue) {
+    AsyncMPMCQueue<int> q;
+
+    std::atomic<int> received{0};
+
+    q.Enqueue(1);
+    q.Enqueue(2);
+    q.Enqueue(3);
+
+    q.Dequeue([&](std::optional<int>) { throw std::runtime_error("error"); });
+    q.Dequeue([&](std::optional<int> v) { if (v) ++received; });
+    q.Dequeue([&](std::optional<int> v) { if (v) ++received; });
+
+    EXPECT_TRUE(WaitFor([&] { return received.load() == 2; })) << "Queue should remain functional after a callback throws";
+    q.Close();
+}
