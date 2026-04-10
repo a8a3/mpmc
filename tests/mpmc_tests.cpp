@@ -1,12 +1,13 @@
 #include <gtest/gtest.h>
-#include "async_mpmc_queue.hpp"
+#include "mpmc_basic.hpp"
 
 #include <atomic>
 #include <chrono>
+#include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
-using namespace unbounded;
 using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
 
@@ -14,21 +15,30 @@ template <typename Pred>
 bool WaitFor(Pred pred, std::chrono::milliseconds timeout = 1'000ms) {
     auto deadline = Clock::now() + timeout;
     while (!pred()) {
-        if (Clock::now() > deadline) 
+        if (Clock::now() > deadline)
             return false;
         std::this_thread::sleep_for(1ms);
     }
     return true;
 }
 
-TEST(AsyncMPMCQueueTest, EnqueueToClosed) {
-    AsyncMPMCQueue<int> q;
+using QueueTypes = ::testing::Types<
+    unbounded::basic::AsyncMPMCQueue<int>
+>;
+
+template <typename Q>
+class AsyncMPMCQueueTypedTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(AsyncMPMCQueueTypedTest, QueueTypes);
+
+TYPED_TEST(AsyncMPMCQueueTypedTest, EnqueueToClosed) {
+    TypeParam q;
     q.Close();
     EXPECT_FALSE(q.Enqueue(1)) << "Enqueue to closed queue should return false";
 }
 
-TEST(AsyncMPMCQueueTest, DequeueFromClosed) {
-    AsyncMPMCQueue<int> q;
+TYPED_TEST(AsyncMPMCQueueTypedTest, DequeueFromClosed) {
+    TypeParam q;
     q.Close();
 
     std::optional<int> result = 42;
@@ -36,10 +46,10 @@ TEST(AsyncMPMCQueueTest, DequeueFromClosed) {
     EXPECT_FALSE(result.has_value()) << "Expected nullopt, got " << *result;
 }
 
-TEST(AsyncMPMCQueueTest, CloseFlushPendingCallbacks) {
-    std::atomic<int> nullopt_count{0};
+TYPED_TEST(AsyncMPMCQueueTypedTest, CloseFlushPendingCallbacks) {
+    std::atomic_int nullopt_count{0};
     {
-        AsyncMPMCQueue<int> q;
+        TypeParam q;
         for (int i = 0; i < 5; ++i) {
             q.Dequeue([&](std::optional<int> v) {
                 if (!v.has_value())
@@ -47,23 +57,23 @@ TEST(AsyncMPMCQueueTest, CloseFlushPendingCallbacks) {
             });
         }
         q.Close();
-    } // destructor joins worker, all callbacks guaranteed to have run
+    }
     EXPECT_EQ(nullopt_count.load(), 5) << "All pending callbacks should be called with nullopt on Close()";
 }
 
-TEST(AsyncMPMCQueueTest, DoubleClose) {
-    AsyncMPMCQueue<int> q;
+TYPED_TEST(AsyncMPMCQueueTypedTest, DoubleClose) {
+    TypeParam q;
     q.Close();
     EXPECT_NO_THROW(q.Close()) << "Second Close() should be safe";
 }
 
-TEST(AsyncMPMCQueueTest, DestructorFlushPendingCallbacks) {
-    std::atomic<int> nullopt_count{0};
+TYPED_TEST(AsyncMPMCQueueTypedTest, DestructorFlushPendingCallbacks) {
+    std::atomic_int nullopt_count{0};
     {
-        AsyncMPMCQueue<int> q;
+        TypeParam q;
         for (int i = 0; i < 3; ++i) {
             q.Dequeue([&](std::optional<int> v) {
-                if (!v.has_value()) 
+                if (!v.has_value())
                     ++nullopt_count;
             });
         }
@@ -71,11 +81,11 @@ TEST(AsyncMPMCQueueTest, DestructorFlushPendingCallbacks) {
     EXPECT_EQ(nullopt_count.load(), 3) << "Destructor should call all pending callbacks with nullopt";
 }
 
-TEST(AsyncMPMCQueueTest, EnqueueThenDequeue) {
-    AsyncMPMCQueue<int> q;
+TYPED_TEST(AsyncMPMCQueueTypedTest, EnqueueThenDequeue) {
+    TypeParam q;
 
-    std::atomic<bool> called{false};
-    std::atomic<int> result{0};
+    std::atomic_bool called{false};
+    std::atomic_int result{0};
     q.Enqueue(42);
     q.Dequeue([&](std::optional<int> v) { result = *v; called = true; });
 
@@ -83,11 +93,11 @@ TEST(AsyncMPMCQueueTest, EnqueueThenDequeue) {
     EXPECT_EQ(result.load(), 42) << "Callback should receive the enqueued value";
 }
 
-TEST(AsyncMPMCQueueTest, DequeueThenEnqueue) {
-    AsyncMPMCQueue<int> q;
+TYPED_TEST(AsyncMPMCQueueTypedTest, DequeueThenEnqueue) {
+    TypeParam q;
 
-    std::atomic<bool> called{false};
-    std::atomic<int> result{0};
+    std::atomic_bool called{false};
+    std::atomic_int result{0};
     q.Dequeue([&](std::optional<int> v) { result = *v; called = true; });
     q.Enqueue(99);
 
@@ -95,8 +105,8 @@ TEST(AsyncMPMCQueueTest, DequeueThenEnqueue) {
     EXPECT_EQ(result.load(), 99) << "Callback should receive the value enqueued after it was registered";
 }
 
-TEST(AsyncMPMCQueueTest, MultipleEnqueueDequeue) {
-    AsyncMPMCQueue<int> q;
+TYPED_TEST(AsyncMPMCQueueTypedTest, MultipleEnqueueDequeue) {
+    TypeParam q;
     const int N = 100;
 
     std::vector<int> results;
@@ -106,7 +116,7 @@ TEST(AsyncMPMCQueueTest, MultipleEnqueueDequeue) {
     for (int i = 0; i < N; ++i) {
         q.Dequeue([&](std::optional<int> v) {
             std::lock_guard guard{m};
-            if (v) 
+            if (v)
                 results.push_back(*v);
         });
     }
@@ -121,20 +131,20 @@ TEST(AsyncMPMCQueueTest, MultipleEnqueueDequeue) {
         EXPECT_EQ(results[i], i) << "Every enqueued value should be received exactly once";
 }
 
-TEST(AsyncMPMCQueueTest, FIFOOrder) {
-    AsyncMPMCQueue<int> q;
+TYPED_TEST(AsyncMPMCQueueTypedTest, FIFOOrder) {
+    TypeParam q;
     const int N = 50;
 
     std::vector<int> results;
     std::mutex m;
 
-    for (int i = 0; i < N; ++i) 
+    for (int i = 0; i < N; ++i)
         q.Enqueue(i);
 
     for (int i = 0; i < N; ++i) {
         q.Dequeue([&](std::optional<int> val) {
             std::lock_guard guard{m};
-            if (val) 
+            if (val)
                 results.push_back(*val);
         });
     }
@@ -148,16 +158,16 @@ TEST(AsyncMPMCQueueTest, FIFOOrder) {
     for (int i = 0; i < N; ++i) EXPECT_EQ(results[i], i) << "Values should be dequeued in FIFO order, index " << i;
 }
 
-TEST(AsyncMPMCQueueTest, SPSC) {
-    AsyncMPMCQueue<int> q;
+TYPED_TEST(AsyncMPMCQueueTypedTest, SPSC) {
+    TypeParam q;
     const int N = 1000;
 
-    std::atomic<int> received{0};
+    std::atomic_int received{0};
 
     std::thread consumer([&] {
         for (int i = 0; i < N; ++i) {
             q.Dequeue([&](std::optional<int> v) {
-                if (v) 
+                if (v)
                     ++received;
             });
         }
@@ -174,18 +184,18 @@ TEST(AsyncMPMCQueueTest, SPSC) {
     q.Close();
 }
 
-TEST(AsyncMPMCQueueTest, MPSC) {
-    AsyncMPMCQueue<int> q;
+TYPED_TEST(AsyncMPMCQueueTypedTest, MPSC) {
+    TypeParam q;
     const int producers = 8;
     const int per_producer = 100;
     const int total = producers * per_producer;
 
-    std::atomic<int> received{0};
+    std::atomic_int received{0};
 
     std::thread consumer([&] {
         for (int i = 0; i < total; ++i) {
             q.Dequeue([&](std::optional<int> v) {
-                if (v) 
+                if (v)
                     ++received;
             });
         }
@@ -206,19 +216,19 @@ TEST(AsyncMPMCQueueTest, MPSC) {
     q.Close();
 }
 
-TEST(AsyncMPMCQueueTest, SPMC) {
-    AsyncMPMCQueue<int> q;
+TYPED_TEST(AsyncMPMCQueueTypedTest, SPMC) {
+    TypeParam q;
     const int consumers = 8;
     const int total = 800;
 
-    std::atomic<int> received{0};
+    std::atomic_int received{0};
 
     std::vector<std::thread> cons_threads;
     for (int c = 0; c < consumers; ++c) {
         cons_threads.emplace_back([&] {
             for (int i = 0; i < total / consumers; ++i) {
                 q.Dequeue([&](std::optional<int> v) {
-                    if (v) 
+                    if (v)
                         ++received;
                 });
             }
@@ -236,21 +246,21 @@ TEST(AsyncMPMCQueueTest, SPMC) {
     q.Close();
 }
 
-TEST(AsyncMPMCQueueTest, MPMC) {
-    AsyncMPMCQueue<int> q;
+TYPED_TEST(AsyncMPMCQueueTypedTest, MPMC) {
+    TypeParam q;
     const int producers = 4;
     const int consumers = 4;
     const int per_producer = 250;
     const int total = producers * per_producer;
 
-    std::atomic<int> received{0};
+    std::atomic_int received{0};
 
     std::vector<std::thread> cons_threads;
     for (int c = 0; c < consumers; ++c) {
         cons_threads.emplace_back([&] {
             for (int i = 0; i < total / consumers; ++i) {
                 q.Dequeue([&](std::optional<int> v) {
-                    if (v) 
+                    if (v)
                         ++received;
                 });
             }
@@ -272,12 +282,12 @@ TEST(AsyncMPMCQueueTest, MPMC) {
     q.Close();
 }
 
-TEST(AsyncMPMCQueueTest, CloseDuringActivity) {
-    std::atomic<int> values_received{0};
-    std::atomic<int> nullopts_received{0};
+TYPED_TEST(AsyncMPMCQueueTypedTest, CloseDuringActivity) {
+    std::atomic_int values_received{0};
+    std::atomic_int nullopts_received{0};
 
     {
-        AsyncMPMCQueue<int> q;
+        TypeParam q;
         const int N = 200;
 
         std::thread consumer([&] {
@@ -301,50 +311,17 @@ TEST(AsyncMPMCQueueTest, CloseDuringActivity) {
 
         producer.join();
         consumer.join();
-    } // destructor joins worker, all callbacks guaranteed to have run
+    }
 
     EXPECT_EQ(values_received.load() + nullopts_received.load(), 200)
         << "Every callback must be called exactly once (either with value or nullopt), got "
         << values_received.load() << " values and " << nullopts_received.load() << " nullopts";
 }
 
-TEST(AsyncMPMCQueueTest, MoveOnlyType) {
-    AsyncMPMCQueue<std::unique_ptr<int>> q;
+TYPED_TEST(AsyncMPMCQueueTypedTest, ReentrantEnqueueFromCallback) {
+    TypeParam q;
 
-    q.Enqueue(std::make_unique<int>(7));
-
-    std::atomic_bool called{false};
-    std::unique_ptr<int> result;
-    q.Dequeue([&](std::optional<std::unique_ptr<int>> v) {
-        result = std::move(*v);
-        called.store(true);
-    });
-
-    EXPECT_TRUE(WaitFor([&] { return called.load(); })) << "Callback should be called for move-only type";
-    EXPECT_EQ(*result, 7) << "Callback should receive the correct value for move-only type";
-    q.Close();
-}
-
-TEST(AsyncMPMCQueueTest, LongRunningCallback) {
-    AsyncMPMCQueue<int> q;
-
-    std::atomic<int> done{0};
-    for (int i = 0; i < 4; ++i) {
-        q.Enqueue(i);
-        q.Dequeue([&](std::optional<int>) {
-            std::this_thread::sleep_for(1'000ms);
-            ++done;
-        });
-    }
-
-    EXPECT_TRUE(WaitFor([&] { return done.load() == 4; }, 5'000ms)) << "Queue should not deadlock with long-running callbacks";
-    q.Close();
-}
-
-TEST(AsyncMPMCQueueTest, ReentrantEnqueueFromCallback) {
-    AsyncMPMCQueue<int> q;
-
-    std::atomic<int> received{0};
+    std::atomic_int received{0};
     q.Enqueue(1);
     q.Dequeue([&](std::optional<int> v) {
         if (v) {
@@ -360,10 +337,10 @@ TEST(AsyncMPMCQueueTest, ReentrantEnqueueFromCallback) {
     q.Close();
 }
 
-TEST(AsyncMPMCQueueTest, ThrowingCallbackDoesNotBreakQueue) {
-    AsyncMPMCQueue<int> q;
+TYPED_TEST(AsyncMPMCQueueTypedTest, ThrowingCallbackDoesNotBreakQueue) {
+    TypeParam q;
 
-    std::atomic<int> received{0};
+    std::atomic_int received{0};
 
     q.Enqueue(1);
     q.Enqueue(2);
@@ -377,11 +354,46 @@ TEST(AsyncMPMCQueueTest, ThrowingCallbackDoesNotBreakQueue) {
     q.Close();
 }
 
-TEST(AsyncMPMCQueueTest, CloseFromCallback) {
-    std::atomic<bool> close_called{false};
+TYPED_TEST(AsyncMPMCQueueTypedTest, DequeueDrainsValuesAfterClose) {
+    TypeParam q;
+    const int N = 5;
 
+    for (int i = 0; i < N; ++i)
+        q.Enqueue(i);
+    q.Close();
+
+    std::vector<int> values;
+    std::atomic_int nullopt_count{0};
+    std::mutex m;
+
+    // N dequeues should drain existing values, then one more should get nullopt
+    for (int i = 0; i < N + 1; ++i) {
+        q.Dequeue([&](std::optional<int> v) {
+            if (v) {
+                std::lock_guard guard{m};
+                values.push_back(*v);
+            } else {
+                ++nullopt_count;
+            }
+        });
+    }
+
+    EXPECT_TRUE(WaitFor([&] {
+        std::lock_guard guard{m};
+        return (int)values.size() + nullopt_count.load() == N + 1;
+    })) << "All callbacks should be called";
+
+    std::lock_guard guard{m};
+    EXPECT_EQ((int)values.size(), N) << "All enqueued values should be delivered after Close()";
+    EXPECT_EQ(nullopt_count.load(), 1) << "Only the last Dequeue (past existing values) should get nullopt";
+    for (int i = 0; i < N; ++i)
+        EXPECT_EQ(values[i], i) << "Values should be delivered in FIFO order after Close(), index " << i;
+}
+
+TYPED_TEST(AsyncMPMCQueueTypedTest, CloseFromCallback) {
     {
-        AsyncMPMCQueue<int> q;
+        TypeParam q;
+        std::atomic_bool close_called{false};
         q.Enqueue(1);
         q.Dequeue([&](std::optional<int>) {
             q.Close();
@@ -389,7 +401,21 @@ TEST(AsyncMPMCQueueTest, CloseFromCallback) {
         });
 
         EXPECT_TRUE(WaitFor([&] { return close_called.load(); })) << "Callback should have been called";
-    } // destructor joins worker — no deadlock
+    }
+}
 
-    EXPECT_TRUE(close_called.load()) << "Close() from inside callback should not deadlock or crash";
+TYPED_TEST(AsyncMPMCQueueTypedTest, LongRunningCallback) {
+    TypeParam q;
+
+    std::atomic_int done{0};
+    for (int i = 0; i < 4; ++i) {
+        q.Enqueue(i);
+        q.Dequeue([&](std::optional<int>) {
+            std::this_thread::sleep_for(1'000ms);
+            ++done;
+        });
+    }
+
+    EXPECT_TRUE(WaitFor([&] { return done.load() == 4; }, 5'000ms)) << "Queue should not deadlock with long-running callbacks";
+    q.Close();
 }

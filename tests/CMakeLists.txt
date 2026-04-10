@@ -12,7 +12,7 @@ if(NOT GTest_FOUND)
 endif()
 
 add_executable(mpmc_tests
-    async_mpmc_queue_test.cpp
+    mpmc_tests.cpp
 )
 
 target_link_libraries(mpmc_tests
