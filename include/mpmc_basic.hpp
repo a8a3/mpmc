@@ -55,14 +55,15 @@ public:
         std::unique_lock lock{mutex_};
         if (isClosed_) return;
 
+        std::queue<DequeueCallback> localCallbacks;
+        callbacksQueue_.swap(localCallbacks);
         isClosed_ = true;
-        while (!callbacksQueue_.empty()) {
-            auto execCb = std::move(callbacksQueue_.front());
-            callbacksQueue_.pop();
+        lock.unlock();
 
-            lock.unlock();
+        while (!localCallbacks.empty()) {
+            auto execCb = std::move(localCallbacks.front());
+            localCallbacks.pop();
             try { execCb(std::nullopt); } catch (...) {}
-            lock.lock();
         }
     }
 
