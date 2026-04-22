@@ -100,17 +100,6 @@ private:
     std::list<std::pair<DequeueCallback, CallbackId>> cbList_;
     using CallbackIter = typename decltype(cbList_)::const_iterator;
     std::unordered_map<CallbackId, CallbackIter> cbMap_;
-
-
-    // 1. execution. 
-    //    + dequeue callback; -> front, pop
-    //    + remove mapping;   -> remove by id;
-    //    + execute callback;
-
-    // 2. cancellation
-    //    + id lookup -> CallbackIter;
-    //    + remove from the list by iter;
-    //    + remove from the map by id;
 };
 
 } // namespace cancellable
