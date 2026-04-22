@@ -51,7 +51,7 @@ public:
             cbList_.push_back(std::make_pair(std::move(cb), cbId_));
             cbMap_.emplace(cbId_, std::prev(cbList_.cend()));
         } 
-        return cbId_++;
+        return std::make_optional(cbId_++);
     }
     
     bool Cancel(CallbackId id) {
