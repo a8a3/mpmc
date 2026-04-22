@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
-#include "mpmc_basic.hpp"
+#include "basic/mpmc.hpp"
+#include "cancellable/mpmc.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -23,7 +24,8 @@ bool WaitFor(Pred pred, std::chrono::milliseconds timeout = 1'000ms) {
 }
 
 using QueueTypes = ::testing::Types<
-    unbounded::basic::AsyncMPMCQueue<int>
+    basic::AsyncMPMCQueue<int>,
+    cancellable::AsyncMPMCQueue<int>
 >;
 
 template <typename Q>

@@ -5,7 +5,7 @@
 #include <optional>
 #include <queue>
 
-namespace unbounded::basic {
+namespace bounded {
 
 template <typename T>
 class AsyncMPMCQueue {
@@ -73,4 +73,4 @@ private:
     std::queue<DequeueCallback> callbacksQueue_;
 };
 
-} // namespace unbounded::basic
+} // namespace bounded
