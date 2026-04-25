@@ -48,8 +48,13 @@ public:
             try { cb(std::move(val)); } catch (...) {}
             return std::nullopt;
         } else {
-            cbList_.push_back(std::make_pair(std::move(cb), cbId_));
-            cbMap_.emplace(cbId_, std::prev(cbList_.cend()));
+            cbList_.emplace_back(std::make_pair(std::move(cb), cbId_));
+            try {
+                cbMap_.emplace(cbId_, std::prev(cbList_.cend()));
+            } catch (...) {
+                cbList_.pop_back();
+                throw;
+            }
         } 
         return std::make_optional(cbId_++);
     }
