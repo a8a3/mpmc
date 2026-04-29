@@ -10,6 +10,7 @@ namespace bounded {
 template <typename T, std::size_t TCapacity>
 class AsyncMPMCQueue {
 public:
+    static_assert(TCapacity > 0, "TCapacity must be greater than zero");
     AsyncMPMCQueue() = default;
 
     // Превращение очереди в ограниченную (bounded).
@@ -26,10 +27,9 @@ public:
             bool localIsClosed = isClosed_;
             lock.unlock();
 
-            try { 
-                auto maybeValue = enqCb(localIsClosed);
-                deqCb(std::move(maybeValue)); 
-            } catch (...) {}
+            std::optional<T> maybeValue = std::nullopt;
+            try {maybeValue = enqCb(localIsClosed);} catch (...) {}
+            try {deqCb(std::move(maybeValue));} catch (...) {}
 
         } else {
 
@@ -38,7 +38,9 @@ public:
             // если в очереди значений есть место-
             // вызвать переданный коллбек и положить в очередь значение, если вернется
             if (valuesQueue_.size() < TCapacity) {
-                if (auto maybeValue = enqCb(isClosed_)) {
+                std::optional<T> maybeValue = std::nullopt;
+                try {maybeValue = enqCb(isClosed_);} catch (...) {}
+                if (maybeValue) {
                     valuesQueue_.emplace(std::move(*maybeValue));
                 }
             // если места нет-
@@ -66,7 +68,9 @@ public:
                     auto enqCb = std::move(enqCbQueue_.front());
                     enqCbQueue_.pop();
 
-                    if (auto maybeValue = enqCb(isClosed_)) {
+                    std::optional<T> maybeValue = std::nullopt;
+                    try {maybeValue = enqCb(isClosed_);} catch (...) {}
+                    if (maybeValue) {
                         valuesQueue_.emplace(std::move(*maybeValue));
                     }
                 }
