@@ -7,22 +7,45 @@
 
 namespace bounded {
 
-template <typename T>
+template <typename T, std::size_t TCapacity>
 class AsyncMPMCQueue {
 public:
     AsyncMPMCQueue() = default;
 
-    bool Enqueue(T value) {
+    // Превращение очереди в ограниченную (bounded).
+    // В этом случае Enqueue тоже начинает принимать колбек
+    // (using EnqueueCallback = std::function<std::optional<T>(bool /*closed*/)>;),
+    // который будет вызван, когда в очереди появится свободный слот.
+    using EnqueueCallback = std::function<std::optional<T>(bool/*closed*/)>;
+    bool Enqueue(EnqueueCallback enqCb) {
         std::unique_lock lock{mutex_};
-        if (isClosed_) return false;
 
-        if (!callbacksQueue_.empty()) {
-            auto execCb = std::move(callbacksQueue_.front());
-            callbacksQueue_.pop();
+        if (!deqCbQueue_.empty()) {
+            auto deqCb = std::move(deqCbQueue_.front());
+            deqCbQueue_.pop();
+            bool localIsClosed = isClosed_;
             lock.unlock();
-            try { execCb(std::move(value)); } catch (...) {}
+
+            try { 
+                auto maybeValue = enqCb(localIsClosed);
+                deqCb(std::move(maybeValue)); 
+            } catch (...) {}
+
         } else {
-            valuesQueue_.push(std::move(value));
+
+            if (isClosed_) return false;
+
+            // если в очереди значений есть место-
+            // вызвать переданный коллбек и положить в очередь значение, если вернется
+            if (valuesQueue_.size() < TCapacity) {
+                if (auto maybeValue = enqCb(isClosed_)) {
+                    valuesQueue_.emplace(std::move(*maybeValue));
+                }
+            // если места нет-
+            // поместить коллбек в очередь коллбеков- продьюсеров
+            } else {
+                enqCbQueue_.emplace(std::move(enqCb));
+            }
         }
         return true;
     }
@@ -36,12 +59,24 @@ public:
             if (!valuesQueue_.empty()) {
                 val = std::move(valuesQueue_.front());
                 valuesQueue_.pop();
+
+                // Значение ушло из очереди, посмотреть- можно ли добавить из 
+                // очереди ожидания
+                if (!enqCbQueue_.empty()) {
+                    auto enqCb = std::move(enqCbQueue_.front());
+                    enqCbQueue_.pop();
+
+                    if (auto maybeValue = enqCb(isClosed_)) {
+                        valuesQueue_.emplace(std::move(*maybeValue));
+                    }
+                }
             } 
             lock.unlock();
 
+            // Потребить значение
             try { cb(std::move(val)); } catch (...) {}
         } else {
-            callbacksQueue_.push(std::move(cb));
+            deqCbQueue_.push(std::move(cb));
         } 
     }
     
@@ -49,15 +84,25 @@ public:
         std::unique_lock lock{mutex_};
         if (isClosed_) return;
 
-        std::queue<DequeueCallback> localCallbacks;
-        callbacksQueue_.swap(localCallbacks);
+        std::queue<DequeueCallback> localDeqCallbacks;
+        deqCbQueue_.swap(localDeqCallbacks);
+
+        std::queue<EnqueueCallback> localEnqCallbacks;
+        enqCbQueue_.swap(localEnqCallbacks);
+
         isClosed_ = true;
         lock.unlock();
 
-        while (!localCallbacks.empty()) {
-            auto execCb = std::move(localCallbacks.front());
-            localCallbacks.pop();
-            try { execCb(std::nullopt); } catch (...) {}
+        while (!localDeqCallbacks.empty()) {
+            auto deqCb = std::move(localDeqCallbacks.front());
+            localDeqCallbacks.pop();
+            try { deqCb(std::nullopt); } catch (...) {}
+        }
+
+        while (!localEnqCallbacks.empty()) {
+            auto enqCb = std::move(localEnqCallbacks.front());
+            localEnqCallbacks.pop();
+            try { enqCb(true/*closed*/); } catch (...) {}
         }
     }
 
@@ -68,9 +113,10 @@ public:
 private:
     std::mutex mutex_;
     bool isClosed_{false};
+    std::queue<EnqueueCallback> enqCbQueue_;
 
     std::queue<T> valuesQueue_;
-    std::queue<DequeueCallback> callbacksQueue_;
+    std::queue<DequeueCallback> deqCbQueue_;
 };
 
 } // namespace bounded

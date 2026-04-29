@@ -14,6 +14,7 @@ endif()
 add_executable(mpmc_tests
     mpmc_tests.cpp
     cancellable_cancel_tests.cpp
+    bounded_mpmc_tests.cpp
 )
 
 target_link_libraries(mpmc_tests
