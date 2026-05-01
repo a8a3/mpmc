@@ -314,19 +314,26 @@ TEST(BoundedMPMCQueue, ThrowingEnqueueCallbackWithCapacity) {
 TEST(BoundedMPMCQueue, ThrowingEnqueueCallbackWithWaitingConsumer) {
     bounded::AsyncMPMCQueue<int, 4> q;
 
-    std::atomic_bool consumerCalled{false};
-    q.Dequeue([&](std::optional<int>) { consumerCalled = true; });
+    // Park a consumer
+    std::atomic_bool firstConsumerCalled{false};
+    q.Dequeue([&](std::optional<int>) { firstConsumerCalled = true; });
 
+    // Throwing producer: enqCb throws → maybeValue stays nullopt → consumer NOT popped
     EXPECT_NO_THROW(q.Enqueue([](bool) -> std::optional<int> {
         throw std::runtime_error("producer error");
     }));
 
-    std::optional<int> result;
-    q.Dequeue([&](std::optional<int> v) { result = v; });
+    // The original consumer is still waiting; next successful enqueue serves it
     q.Enqueue(MakeProducer(7));
+    EXPECT_TRUE(WaitFor([&] { return firstConsumerCalled.load(); }))
+        << "Original consumer should be served by the next successful enqueue";
 
+    // Queue should still work normally
+    std::optional<int> result;
+    q.Enqueue(MakeProducer(99));
+    q.Dequeue([&](std::optional<int> v) { result = v; });
     EXPECT_TRUE(WaitFor([&] { return result.has_value(); }));
-    EXPECT_EQ(*result, 7);
+    EXPECT_EQ(*result, 99);
 }
 
 TEST(BoundedMPMCQueue, ThrowingQueuedEnqueueCallback) {
@@ -364,4 +371,96 @@ TEST(BoundedMPMCQueue, ThrowingDequeueCallback) {
 
     EXPECT_TRUE(WaitFor([&] { return result.has_value(); }));
     EXPECT_EQ(*result, 10);
+}
+
+TEST(BoundedMPMCQueue, ProducerDeclinesConsumerInQueue) {
+    bounded::AsyncMPMCQueue<int, 4> q;
+
+    std::optional<int> received;
+    bool called = false;
+    q.Dequeue([&](std::optional<int> v) { received = v; called = true; });
+
+    // Producer declines → consumer stays in deqCbQueue_
+    q.Enqueue(MakeDeclinedProducer());
+    EXPECT_FALSE(called) << "Consumer should still be waiting after producer declined";
+
+    q.Enqueue(MakeProducer(42));
+    EXPECT_TRUE(WaitFor([&] { return called; }));
+    ASSERT_TRUE(received.has_value());
+    EXPECT_EQ(*received, 42);
+}
+
+TEST(BoundedMPMCQueue, SlowAndFastProducers) {
+    bounded::AsyncMPMCQueue<int, 2> q;
+
+    std::atomic_bool enqCbStarted{false};
+    std::atomic_bool consumerServedByOther{false};
+
+    // add consumer
+    std::optional<int> directResult;
+    q.Dequeue([&](std::optional<int> v) { directResult = v; });
+
+    // add slow producer A
+    std::thread producerA([&] {
+        q.Enqueue([&](bool) -> std::optional<int> {
+            enqCbStarted = true;
+            while (!consumerServedByOther) std::this_thread::yield();
+            return 1;
+        });
+    });
+
+    while (!enqCbStarted) std::this_thread::yield();
+
+    // add fast producer
+    q.Enqueue(MakeProducer(99));
+    consumerServedByOther = true;
+
+    producerA.join();
+
+    EXPECT_TRUE(directResult.has_value());
+    EXPECT_EQ(*directResult, 99);
+
+    std::optional<int> buffered;
+    q.Dequeue([&](std::optional<int> v) { buffered = v; });
+    EXPECT_TRUE(WaitFor([&] { return buffered.has_value(); }));
+    EXPECT_EQ(*buffered, 1);
+}
+
+TEST(BoundedMPMCQueue, ReservationCheck) {
+    bounded::AsyncMPMCQueue<int, 1> q;
+
+    std::atomic_bool slowRunning{false};
+    std::atomic_bool proceedSlow{false};
+    std::atomic_bool fastCbCalled{false};
+
+    std::thread slowProducer([&] {
+        q.Enqueue([&](bool) -> std::optional<int> {
+            slowRunning = true;
+            while (!proceedSlow) std::this_thread::yield();
+            return 10;
+        });
+    });
+
+    while (!slowRunning) std::this_thread::yield();
+
+    q.Enqueue([&](bool) -> std::optional<int> {
+        fastCbCalled = true;
+        return 20;
+    });
+
+    EXPECT_FALSE(fastCbCalled.load())
+        << "Fast producer should be queued while slow producer holds the reservation";
+
+    proceedSlow = true;
+    slowProducer.join();
+
+    std::optional<int> v1, v2;
+    q.Dequeue([&](std::optional<int> v) { v1 = v; });
+    EXPECT_TRUE(WaitFor([&] { return v1.has_value(); }));
+    EXPECT_EQ(*v1, 10);
+
+    q.Dequeue([&](std::optional<int> v) { v2 = v; });
+    EXPECT_TRUE(WaitFor([&] { return v2.has_value(); }));
+    EXPECT_EQ(*v2, 20);
+    EXPECT_TRUE(fastCbCalled.load());
 }

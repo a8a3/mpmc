@@ -21,25 +21,45 @@ public:
     bool Enqueue(EnqueueCallback enqCb) {
         std::unique_lock lock{mutex_};
 
+        if (isClosed_) return false;
+
         if (!deqCbQueue_.empty()) {
-            auto deqCb = std::move(deqCbQueue_.front());
-            deqCbQueue_.pop();
-            bool localIsClosed = isClosed_;
+            // выполняется инвариант- если есть доступный консюмер, значит очередь
+            // значений- пуста, поэтому можно резервировать слот
+            ++reservedValuesSlots_;
             lock.unlock();
 
             std::optional<T> maybeValue = std::nullopt;
-            try {maybeValue = enqCb(localIsClosed);} catch (...) {}
-            try {deqCb(std::move(maybeValue));} catch (...) {}
+            try {maybeValue = enqCb(false);} catch (...) {}
 
+            lock.lock();
+            --reservedValuesSlots_;
+
+            if (maybeValue) {
+                if (!deqCbQueue_.empty()) {
+                    auto deqCb = std::move(deqCbQueue_.front());
+                    deqCbQueue_.pop();
+                    lock.unlock();
+
+                    try {deqCb(std::move(maybeValue));} catch (...) {}
+                } else {
+                    valuesQueue_.emplace(std::move(*maybeValue));
+                }
+            }
         } else {
-
-            if (isClosed_) return false;
 
             // если в очереди значений есть место-
             // вызвать переданный коллбек и положить в очередь значение, если вернется
-            if (valuesQueue_.size() < TCapacity) {
+            if (valuesQueue_.size() + reservedValuesSlots_ < TCapacity) {
+                bool localIsClosed = isClosed_;
+                ++reservedValuesSlots_;
+                lock.unlock();
+
                 std::optional<T> maybeValue = std::nullopt;
-                try {maybeValue = enqCb(isClosed_);} catch (...) {}
+                try {maybeValue = enqCb(localIsClosed);} catch (...) {}
+
+                lock.lock();
+                --reservedValuesSlots_;
                 if (maybeValue) {
                     valuesQueue_.emplace(std::move(*maybeValue));
                 }
@@ -67,9 +87,15 @@ public:
                 if (!enqCbQueue_.empty()) {
                     auto enqCb = std::move(enqCbQueue_.front());
                     enqCbQueue_.pop();
+                    bool localIsClosed = isClosed_;
+                    ++reservedValuesSlots_;
+                    lock.unlock();
 
                     std::optional<T> maybeValue = std::nullopt;
-                    try {maybeValue = enqCb(isClosed_);} catch (...) {}
+                    try {maybeValue = enqCb(localIsClosed);} catch (...) {}
+
+                    lock.lock();
+                    --reservedValuesSlots_;
                     if (maybeValue) {
                         valuesQueue_.emplace(std::move(*maybeValue));
                     }
@@ -120,6 +146,8 @@ private:
     std::queue<EnqueueCallback> enqCbQueue_;
 
     std::queue<T> valuesQueue_;
+    std::size_t reservedValuesSlots_{0};
+
     std::queue<DequeueCallback> deqCbQueue_;
 };
 
